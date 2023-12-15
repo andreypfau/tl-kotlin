@@ -1,0 +1,11 @@
+product:
+  type: lib
+  platforms: [ jvm, iosArm64, iosSimulatorArm64 ]
+
+settings:
+  kotlin:
+    languageVersion: 1.9
+
+dependencies:
+  - org.jetbrains.kotlinx:kotlinx-io-core:0.3.0
+  - org.jetbrains.kotlinx:kotlinx-serialization-core:1.6.1

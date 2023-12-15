@@ -1,0 +1,11 @@
+product:
+  type: jvm/app
+  platforms: [ jvm ]
+
+settings:
+  kotlin:
+    languageVersion: 1.9
+
+dependencies:
+  - ../tl-parser
+  - me.alllex.parsus:parsus:0.6.0

@@ -1,0 +1,17 @@
+product:
+  type: lib
+  platforms: [ jvm, iosArm64, iosSimulatorArm64 ]
+
+settings:
+  kotlin:
+    languageVersion: 1.9
+    serialization:
+      format: json
+
+dependencies:
+  - ../tl-serialization
+  - org.jetbrains.kotlinx:kotlinx-tl-serialization-core:1.6.1
+
+test-dependencies:
+  - ../tl-serialization
+  - org.jetbrains.kotlinx:kotlinx-io-core:0.3.0
