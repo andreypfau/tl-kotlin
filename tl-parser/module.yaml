@@ -8,3 +8,4 @@ settings:
 
 dependencies:
   - me.alllex.parsus:parsus:0.6.0
+  - io.github.andreypfau:kotlinx-crypto-crc32:0.0.1

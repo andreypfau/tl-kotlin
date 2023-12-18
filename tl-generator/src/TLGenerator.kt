@@ -1,15 +1,58 @@
 package io.github.andreypfau.tl.generator
 
+import com.squareup.kotlinpoet.*
+import com.squareup.kotlinpoet.ParameterizedTypeName.Companion.parameterizedBy
 import io.github.andreypfau.tl.parser.TLGrammar
 import io.github.andreypfau.tl.parser.ast.*
 import java.io.File
-import kotlin.math.exp
 
 fun main(args: Array<String>) {
-    val rawProgram = File("/Users/andreypfau/IdeaProjects/tl-kotlin/tl-generator/resources/ton_api.tl").readText()
-    val tlProgram = TLGrammar.parseOrThrow(rawProgram)
-    val tlGenerator =
-        TLGenerator(tlProgram, "tl", File("/Users/andreypfau/IdeaProjects/tl-kotlin/tl-generator/resources/"))
+    val srcDir = File("/Users/andreypfau/IdeaProjects/tl-kotlin/examples/src/")
+    generate(
+        File("/Users/andreypfau/IdeaProjects/tl-kotlin/examples/resources/tl.tl"),
+        "tl",
+        srcDir
+    )
+    generate(
+        File("/Users/andreypfau/IdeaProjects/tl-kotlin/examples/resources/telegram_api.tl"),
+        "tl.telegram",
+        srcDir
+    )
+    generate(
+        File("/Users/andreypfau/IdeaProjects/tl-kotlin/examples/resources/td_api.tl"),
+        "tl.td",
+        srcDir
+    )
+    generate(
+        File("/Users/andreypfau/IdeaProjects/tl-kotlin/examples/resources/secret_api.tl"),
+        "tl.secret",
+        srcDir
+    )
+    generate(
+        File("/Users/andreypfau/IdeaProjects/tl-kotlin/examples/resources/mtproto_api.tl"),
+        "tl.mtproto",
+        srcDir
+    )
+    generate(
+        File("/Users/andreypfau/IdeaProjects/tl-kotlin/examples/resources/tonlib_api.tl"),
+        "tl.tonlib",
+        srcDir
+    )
+    generate(
+        File("/Users/andreypfau/IdeaProjects/tl-kotlin/examples/resources/ton_api.tl"),
+        "tl.ton",
+        srcDir
+    )
+    generate(
+        File("/Users/andreypfau/IdeaProjects/tl-kotlin/examples/resources/lite_api.tl"),
+        "tl.ton",
+        srcDir
+    )
+}
+
+fun generate(tlFile: File, rootPackage: String, outputDir: File) {
+    val tlProgram = TLGrammar.parseOrThrow(tlFile.readText())
+    val tlGenerator = TLGenerator(tlProgram, rootPackage, outputDir)
     tlGenerator.generate()
 }
 
@@ -22,59 +65,332 @@ internal class TLGenerator(
         file.parentFile.mkdirs()
     }
 
-    private val typeMap = LinkedHashMap<String, MutableList<CombinatorDeclaration>>()
+    private val typeMap = LinkedHashMap<BoxedTypeIdentifier, MutableList<CombinatorDeclaration>>()
 
     fun generate() {
         populateTypeMap()
 
-        typeMap.forEach { boxedTypeName, combinators ->
-            val typeFile = File(file, boxedTypeName.split(".").let {
-                buildString {
-                    it.forEachIndexed { index, part ->
-                        if (index != 0) append("/")
-                        if (index == it.lastIndex) {
-                            val name =
-                                boxedTypeName.split(".").joinToString("") { it.replaceFirstChar { it.uppercaseChar() } }
-                            append(name)
-                        } else {
-                            append(part.lowercase())
+        typeMap.forEach { (boxedTypeName, combinators) ->
+
+            println("Generating $boxedTypeName")
+            val resultTypeClassName = getResultTypeClassName(boxedTypeName)
+            println(resultTypeClassName)
+//            combinators.forEach {
+//                println("    ${getCombinatorClassName(it)} | ${it.fullCombinatorName} | $it")
+//            }
+
+            val serializableAnnotation = AnnotationSpec.builder(ClassName("kotlinx.serialization", "Serializable"))
+                .build()
+            val jsonClassDiscriminatorAnnotation =
+                AnnotationSpec.builder(ClassName("kotlinx.serialization.json", "JsonClassDiscriminator"))
+                    .addMember("%S", "@type")
+                    .build()
+
+            val fileSpecBuilder = FileSpec.builder(resultTypeClassName).indent("    ")
+            fileSpecBuilder.apply {
+                if (combinators.size > 1) {
+                    if (combinators.all { it.args.isEmpty() }) {
+                        addType(TypeSpec.enumBuilder(resultTypeClassName).apply {
+                            addAnnotation(serializableAnnotation)
+                            addAnnotation(jsonClassDiscriminatorAnnotation)
+                            combinators.forEach { combinator ->
+                                val combinatorName = getCombinatorClassName(combinator)
+                                val typeSpec = TypeSpec.anonymousClassBuilder().apply {
+                                    addAnnotation(
+                                        AnnotationSpec.builder(ClassName("kotlinx.serialization", "SerialName"))
+                                            .addMember("%S", combinator.id.name)
+                                            .build()
+                                    )
+                                    addAnnotation(
+                                        getTlConstructorIdAnnotation(combinator)
+                                    )
+                                }.build()
+                                addEnumConstant(combinatorName.simpleName.camelCaseToSnakeCase(), typeSpec)
+                            }
+                            addType(TypeSpec.companionObjectBuilder().build())
+                        }.build())
+                    } else {
+                        addType(
+                            TypeSpec.interfaceBuilder(resultTypeClassName)
+                                .addAnnotation(serializableAnnotation)
+                                .addAnnotation(jsonClassDiscriminatorAnnotation)
+                                .addModifiers(KModifier.SEALED).apply {
+                                    combinators.forEach { combinator ->
+                                        addType(
+                                            getTypeSpec(combinator).toBuilder().addSuperinterface(resultTypeClassName)
+                                                .build()
+                                        )
+                                    }
+                                }
+                                .addType(TypeSpec.companionObjectBuilder().build())
+                                .build()
+                        )
+                    }
+                } else {
+                    val combinator = combinators.first()
+                    addType(getTypeSpec(combinator))
+                }
+            }
+            fileSpecBuilder.addKotlinDefaultImports()
+            fileSpecBuilder.addFileComment("This file is generated by TLGenerator.kt\nDo not edit manually!")
+//            fileSpecBuilder.addAnnotation(
+//                AnnotationSpec.builder(ClassName("kotlinx.serialization", "UseSerializers"))
+//                    .addMember("%T::class", ClassName("io.github.andreypfau.tl.serialization", "Base64ByteStringSerializer"))
+//                    .build()
+//            )
+            fileSpecBuilder.build().writeTo(file)
+        }
+    }
+
+    fun getTlConstructorIdAnnotation(combinator: CombinatorDeclaration): AnnotationSpec {
+        return AnnotationSpec.builder(ClassName("io.github.andreypfau.tl.serialization", "TLCombinatorId"))
+            .addMember("0x%L", combinator.fullCombinatorName.hash.uppercase())
+            .build()
+    }
+
+    fun getTypeSpec(combinator: CombinatorDeclaration): TypeSpec {
+        val combinatorName = getCombinatorClassName(combinator)
+
+        if (combinator.args.isEmpty()) {
+            return TypeSpec.objectBuilder(combinatorName)
+                .addAnnotation(ClassName("kotlinx.serialization", "Serializable"))
+                .addAnnotation(
+                    AnnotationSpec.builder(ClassName("kotlinx.serialization", "SerialName"))
+                        .addMember("%S", combinator.id.name)
+                        .build()
+                )
+                .addAnnotation(getTlConstructorIdAnnotation(combinator))
+                .build()
+        }
+
+        return TypeSpec.classBuilder(combinatorName).apply {
+            addModifiers(KModifier.DATA)
+            addAnnotation(ClassName("kotlinx.serialization", "Serializable"))
+            addAnnotation(
+                AnnotationSpec.builder(ClassName("kotlinx.serialization", "SerialName"))
+                    .addMember("%S", combinator.id.name)
+                    .build()
+            )
+            addAnnotation(getTlConstructorIdAnnotation(combinator))
+            addType(TypeSpec.companionObjectBuilder().build())
+            primaryConstructor(
+                FunSpec.constructorBuilder().apply {
+                    combinator.args.forEach { argument ->
+                        var typeName = getTypeName(argument.argType.expression)
+                        if (argument.conditionalDef != null) {
+                            typeName = typeName.copy(nullable = true)
                         }
+                        addParameter(ParameterSpec.builder(getArgumentName(argument.id), typeName).apply {
+                            if (argument.conditionalDef != null) {
+                                defaultValue("null")
+                            }
+                        }.build())
+                    }
+                }.build()
+            )
+            combinator.args.forEach { argument ->
+                val argumentName = getArgumentName(argument.id)
+                val conditionalDef = argument.conditionalDef
+                val argTypeExpression = argument.argType.expression
+                val typeName = getTypeName(argTypeExpression).let {
+                    if (conditionalDef != null) {
+                        it.copy(nullable = true)
+                    } else {
+                        it
                     }
                 }
-            } + ".kt")
-            val filePackage = rootPackage + boxedTypeName.lowercase().split(".").dropLast(1).joinToString(".").let {
-                if (it.isEmpty()) "" else ".$it"
+                addProperty(
+                    PropertySpec.builder(argumentName, typeName).apply {
+                        initializer(argumentName)
+                        if (argumentName != argument.id.name) {
+                            addAnnotation(
+                                AnnotationSpec.builder(ClassName("kotlinx.serialization", "SerialName"))
+                                    .addMember("%S", argument.id.name)
+                                    .build()
+                            )
+                        }
+                        if (conditionalDef != null) {
+                            val index = conditionalDef.nat
+                            if (index != null) {
+                                addAnnotation(
+                                    AnnotationSpec.builder(
+                                        ClassName(
+                                            "io.github.andreypfau.tl.serialization",
+                                            "TLConditional"
+                                        )
+                                    ).addMember("%S, %L", conditionalDef.id.name, index).build()
+                                )
+                            }
+                        }
+                        if (argTypeExpression is ETypeIdentifier) {
+                            when (argTypeExpression.id.name) {
+                                "int128" -> {
+                                    addAnnotation(
+                                        AnnotationSpec.builder(
+                                            ClassName(
+                                                "io.github.andreypfau.tl.serialization",
+                                                "TLFixedSize"
+                                            )
+                                        ).addMember("value = %L", 16).build()
+                                    )
+                                }
+
+                                "int256" -> {
+                                    addAnnotation(
+                                        AnnotationSpec.builder(
+                                            ClassName(
+                                                "io.github.andreypfau.tl.serialization",
+                                                "TLFixedSize"
+                                            )
+                                        ).addMember("value = %L", 32).build()
+                                    )
+                                }
+                            }
+                        }
+                        if (argTypeExpression is EMultiArg) {
+                            val annotation = when (val e = argTypeExpression.multiplicity?.expression) {
+                                is ETypeIdentifier -> AnnotationSpec.builder(
+                                    ClassName(
+                                        "io.github.andreypfau.tl.serialization",
+                                        "TLFixedSize"
+                                    )
+                                ).addMember("field = %S", e.id.name).build()
+
+                                is ENat -> AnnotationSpec.builder(
+                                    ClassName(
+                                        "io.github.andreypfau.tl.serialization",
+                                        "TLFixedSize"
+                                    )
+                                ).addMember("value = %L", e.value).build()
+
+                                else -> null
+                            }
+                            if (annotation != null) {
+                                addAnnotation(annotation)
+                            }
+                        }
+                        addAnnotation(
+                            AnnotationSpec.builder(ClassName("kotlin.jvm", "JvmName"))
+                                .useSiteTarget(AnnotationSpec.UseSiteTarget.GET)
+                                .addMember("%S", argumentName)
+                                .build()
+                        )
+                    }.build()
+                )
             }
-            TLFileGenerator(this, typeFile, filePackage, combinators).generate()
-        }
+        }.build()
     }
 
-    fun getCombinatorClassName(combinator: CombinatorDeclaration): String {
-        val superType = typeMap[combinator.resultType.id.name] ?: listOf()
-        if (superType.size > 1) {
-            val names = superType?.map { it.id.name.split(".").dropLast(1).joinToString(".") } ?: listOf()
-            return combinator.id.name.removePrefix(findCommonPrefix(names)).split(".").joinToString("") {
-                it.replaceFirstChar { it.uppercaseChar() }
-            }
+    fun getArgumentName(optionalVariableIdentifier: OptionalVariableIdentifier): String {
+        if (optionalVariableIdentifier is EmptyVariableIdentifier) {
+            return "value"
+        }
+        return optionalVariableIdentifier.name.split("_").joinToString("") {
+            it.replaceFirstChar { it.uppercaseChar() }
+        }.replaceFirstChar { it.lowercaseChar() }
+    }
+
+    fun getCombinatorClassName(combinator: CombinatorDeclaration): ClassName {
+        val superType = typeMap[combinator.resultType.id] ?: listOf()
+        return if (superType.size > 1) {
+            val superClassName = getResultTypeClassName(combinator.resultType.id)
+
+            val names = superType.map { it.id.name.split(".", "_").dropLast(1).joinToString(".") }
+            val subClassName =
+                combinator.id.name.removePrefix(findCommonPrefix(names)).split(".", "_").joinToString("") {
+                    it.replaceFirstChar { it.uppercaseChar() }
+                }
+
+            ClassName(superClassName.packageName, superClassName.simpleName, subClassName)
         } else {
-            return combinator.resultType.id.name.split(".").joinToString("") {
-                it.replaceFirstChar { it.uppercaseChar() }
-            }
+            getResultTypeClassName(combinator.resultType.id)
         }
     }
 
-    fun getCombinatorPackage(combinator: CombinatorDeclaration): String {
-        return rootPackage + combinator.resultType.id.name.lowercase().split(".").dropLast(1).joinToString(".").let {
+    fun getResultTypeClassName(id: BoxedTypeIdentifier): ClassName {
+        val packageName = rootPackage + id.name.lowercase().split(".", "_").dropLast(1).joinToString(".").let {
             if (it.isEmpty()) "" else ".$it"
         }
+        return ClassName(
+            packageName,
+            id.name.split(".", "_").joinToString("") { it.replaceFirstChar { it.uppercaseChar() } })
     }
 
-    fun getTypeClassName(string: String): String {
-        return string.split(".").joinToString("") { it.replaceFirstChar { it.uppercaseChar() } }
-    }
+    fun getTypeName(expression: Expression): TypeName {
+        return when (expression) {
+            is EExpression -> {
+                val subExpressions = expression.subExpressions.map { getTypeName(it) }
+                if (subExpressions.size == 2) {
+                    val (expr1, expr2) = subExpressions
+//                    return (expr1 as ClassName).parameterizedBy(expr2.let {
+//                        if (it is ClassName && it.canonicalName == "kotlinx.io.bytestring.ByteString") {
+//                            it.copy()
+//                        } else {
+//                            it
+//                        }
+//                    })
+                    return (expr1 as ClassName).parameterizedBy(expr2)
+                }
+                null
+            }
 
-    fun getTypeClassName(resultType: ResultType): String {
-        return getTypeClassName(resultType.id.name)
+            is EMultiArg ->
+                List::class.asClassName()
+                    .parameterizedBy(getTypeName(expression.subArgs.first().argType.expression)) // TODO: use fixed size List
+            is ENat -> null
+            is EBangOperator -> null
+            is EPercentOperator -> null
+            is EPlusOperator -> null
+            is ETypeIdentifier -> {
+                val id = expression.id
+                when (id.name) {
+                    "int", "int32", "Int32" -> Int::class.asClassName()
+                    "#" -> Int::class.asClassName()
+                    "long", "int53", "Int53", "Int64", "int64" -> Long::class.asClassName()
+                    "double" -> Double::class.asClassName()
+                    "string", "secureString" -> String::class.asClassName()
+                    "Bool" -> Boolean::class.asClassName()
+                    "vector" -> List::class.asClassName()
+                    "Vector" -> List::class.asClassName() // TODO: boxed decode for Vector
+                    "int128",
+                    "int256",
+                    "bytes",
+                    "secureBytes",
+                    "object",
+                    "function" -> ClassName("kotlinx.io.bytestring", "ByteString").let {
+                        it.copy(
+                            annotations = it.annotations + AnnotationSpec.builder(
+                                ClassName(
+                                    "kotlinx.serialization",
+                                    "Serializable"
+                                )
+                            )
+                                .addMember(
+                                    "%T::class",
+                                    ClassName("io.github.andreypfau.tl.serialization", "Base64ByteStringSerializer")
+                                )
+                                .build()
+                        )
+                    }
+
+                    "true" -> Unit::class.asClassName()
+                    else -> {
+                        typeMap.entries.forEach { (_, combinators) ->
+                            val combinator = combinators.find {
+                                it.id.name == id.name
+                            }
+                            if (combinator != null) {
+                                return getCombinatorClassName(combinator)
+                            }
+                        }
+                        if (id is BoxedTypeIdentifier) {
+                            return getResultTypeClassName(id)
+                        }
+                        null
+                    }
+                }
+            }
+        } ?: throw IllegalStateException("Cannot get type name for expression: $expression")
     }
 
     private fun populateTypeMap() {
@@ -84,9 +400,9 @@ internal class TLGenerator(
                 is CombinatorDeclaration -> {
                     val id = decl.id.name
                     when (id) {
-                        "bytes", "true", "boolTrue", "boolFalse", "vector", "int128", "int256" -> return@forEach
+                        "bytes", "true", "boolTrue", "boolFalse", "vector", "int128", "int256", "int32", "int53", "int64", "secureBytes", "secureString" -> return@forEach
                     }
-                    val typeCombinators = typeMap.getOrPut(decl.resultType.id.name) { ArrayList() }
+                    val typeCombinators = typeMap.getOrPut(decl.resultType.id) { ArrayList() }
                     typeCombinators.add(decl)
                 }
 
@@ -112,165 +428,8 @@ internal class TLGenerator(
     }
 }
 
-private class TLFileGenerator(
-    val generator: TLGenerator,
-    val file: File,
-    val rootPackage: String,
-    val combinators: List<CombinatorDeclaration>
-) {
-    private var indent = 0
-    private val builder = StringBuilder()
-
-    private var packageName: String = ""
-    private var classes: List<GeneratedClass> = ArrayList()
-    private var interfaces: List<GeneratedInterface> = ArrayList()
-
-    class GeneratedClass(
-        val serialName: String,
-        val name: String,
-        val superName: String,
-        val fields: List<GeneratedField>
-    ) {
-        override fun toString(): String {
-            val superName = if (superName == "Any") {
-                ""
-            } else {
-                " : $superName"
-            }
-            if (fields.isEmpty()) {
-                return "@Serializable\n@SerialName(\"${serialName}\")\npublic data object $name$superName"
-            }
-
-            val fields = fields.joinToString("\n") {
-                it.toString().lines().joinToString("\n") {
-                    "    $it"
-                }
-            }
-
-            return "@Serializable\n@SerialName(\"${serialName}\")\npublic class $name(\n${fields}\n)$superName"
-        }
-    }
-
-    class GeneratedField(
-        val name: String,
-        val type: String,
-    ) {
-        override fun toString(): String {
-            val fieldName = name.split("_").joinToString("") {
-                it.replaceFirstChar { it.uppercaseChar() }
-            }.replaceFirstChar { it.lowercaseChar() }
-            val serialName = if (fieldName != name) {
-                "@SerialName(\"$name\")\n"
-            } else {
-                ""
-            }
-            return "${serialName}public val $fieldName: $type,"
-        }
-    }
-
-    class GeneratedInterface(
-        val name: String,
-        val subclasses: List<GeneratedClass>
-    ) {
-        override fun toString(): String {
-            val classes = subclasses.joinToString("\n\n") {
-                it.toString().lines().joinToString("\n") {
-                    "    $it"
-                }
-            }
-            println("classes: \n$classes")
-            return "public sealed interface $name {\n$classes\n}"
-        }
-    }
-
-    fun generate() {
-        file.parentFile.mkdirs()
-        generateFile()
-        file.writeText(builder.toString())
-    }
-
-    private fun generateFile() {
-        packageName = generator.getCombinatorPackage(combinators.first())
-
-        if (combinators.size > 1) {
-            val interfaceName = file.nameWithoutExtension
-            val subclasses = combinators.map { combinator ->
-                val className = generator.getCombinatorClassName(combinator)
-                val fields = generateFields(combinator)
-                GeneratedClass(combinator.id.name, className, interfaceName, fields)
-            }
-            interfaces = listOf(GeneratedInterface(interfaceName, subclasses))
-        } else {
-            val combinator = combinators.first()
-            val className = generator.getCombinatorClassName(combinator)
-            val fields = generateFields(combinator)
-            classes = listOf(GeneratedClass(combinator.id.name, className, "Any", fields))
-        }
-
-        builder.appendLine("package $packageName")
-        builder.appendLine()
-        interfaces.forEach {
-            builder.appendLine(it.toString())
-        }
-        classes.forEach {
-            builder.appendLine(it.toString())
-        }
-    }
-
-    private fun generateFields(combinator: CombinatorDeclaration): List<GeneratedField> {
-        return combinator.args.map { arg ->
-            generateField(arg)
-        }
-    }
-
-    private fun generateField(arg: Argument): GeneratedField {
-        return GeneratedField(arg.id.name, type(arg.argType.expression))
-    }
-
-    private fun type(expression: Expression): String {
-        return when (expression) {
-            is EExpression -> {
-                val firstExpression = expression.subExpressions.firstOrNull()
-                if (firstExpression != null) {
-                    val result = type(firstExpression)
-                    if (result == "List") {
-                        return "List<${type(expression.subExpressions[1])}>"
-                    }
-                    return result
-                }
-                "Any"
-            }
-
-            is EMultiArg -> "Any"
-            is ENat -> "Int"
-            is EBangOperator -> "Any"
-            is EPercentOperator -> "Any"
-            is EPlusOperator -> "Any"
-            is ETypeIdentifier -> {
-                when (expression.id.name) {
-                    "int" -> "Int"
-                    "long" -> "Long"
-                    "bytes" -> "ByteArray"
-                    "vector" -> "List"
-                    "Bool" -> "Boolean"
-                    "int256" -> "ByteArray"
-                    "#" -> "Int"
-                    else -> {
-                        if (expression.id.name.contains(".")) {
-                            generator.rootPackage + "." + expression.id.name.split(".").dropLast(1).joinToString(".") + "." + generator.getTypeClassName(
-                                expression.id.name
-                            )
-                        } else {
-                            generator.rootPackage + "." + generator.getTypeClassName(
-                                expression.id.name
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-
+fun String.camelCaseToSnakeCase(): String {
+    return this.replace(Regex("([a-z])([A-Z])"), "$1_$2").uppercase()
 }
 
 fun findCommonPrefix(strings: List<String>): String {

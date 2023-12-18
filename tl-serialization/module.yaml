@@ -5,6 +5,8 @@ product:
 settings:
   kotlin:
     languageVersion: 1.9
+    serialization:
+      format: json
 
 dependencies:
   - org.jetbrains.kotlinx:kotlinx-io-core:0.3.0

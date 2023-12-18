@@ -9,7 +9,7 @@ import me.alllex.parsus.token.regexToken
 public object TLGrammar : Grammar<TLProgram>() {
     init {
         regexToken("\\s+", ignored = true)
-        regexToken("//\\s*(.*)", ignored = true)
+        regexToken("//(.*)", ignored = true)
     }
 
     private val tripleMinus by literalToken("---")
@@ -31,7 +31,7 @@ public object TLGrammar : Grammar<TLProgram>() {
     private val comma by literalToken(",")
     private val percent by literalToken("%")
     private val underscore by literalToken("_")
-    private val hex by regexToken("#[0-9a-f][0-9a-f][0-9a-f][0-9a-f]([0-9a-f][0-9a-f][0-9a-f][0-9a-f])?")
+    private val hex by regexToken("#[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]?[0-9a-f]?[0-9a-f]?[0-9a-f]?")
     private val digit by regexToken("\\d")
     private val natConst by oneOrMore(digit) map { digits ->
         buildString {
@@ -129,7 +129,11 @@ public object TLGrammar : Grammar<TLProgram>() {
     }
 
     private val expr by zeroOrMore(ref(::subexpr)) map {
-        EExpression(it)
+        if (it.size > 1) {
+            EExpression(it)
+        } else {
+            it.first()
+        }
     }
 
     private val eTypeIdent by typeIdent map {
@@ -138,7 +142,14 @@ public object TLGrammar : Grammar<TLProgram>() {
 
     private val parenExpression by -lParen * expr * -rParen
 
-    private val term: Parser<Expression> by parenExpression or eTypeIdent or eNat or percentExpr
+    private val escapedExpr by eTypeIdent and -literalToken("<") and separated(
+        expr,
+        comma
+    ) and -literalToken(">") map { (id, subExprs) ->
+        EExpression(listOf(id) + subExprs)
+    }
+
+    private val term: Parser<Expression> by percentExpr or parenExpression or escapedExpr or eTypeIdent or eNat
 
     private val typeTerm by optional(bang) * term map { (bang, expr) ->
         val expression = if (bang != null) {
@@ -178,7 +189,7 @@ public object TLGrammar : Grammar<TLProgram>() {
         }
     }
     private val args2 by parser {
-        val id = varIdent()
+        val id = varIdentOpt()
         skip(colon)
         skip(lParen)
         val cond = poll(condDef)
@@ -188,7 +199,7 @@ public object TLGrammar : Grammar<TLProgram>() {
     }
 
     private val args1 by parser {
-        val id = varIdent()
+        val id = varIdentOpt()
         skip(colon)
         val cond = poll(condDef)
         val argType = typeTerm()
@@ -291,4 +302,13 @@ public object TLGrammar : Grammar<TLProgram>() {
 
         TLProgram(ConstructorDeclarations(constructors), FunctionDeclarations(functions))
     }
+}
+
+public fun main() {
+    val program = TLGrammar.parseOrThrow(
+        """
+    foo _:int = Foo;
+    """.trimIndent()
+    )
+    println(program)
 }

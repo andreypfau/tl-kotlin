@@ -1,0 +1,13 @@
+product:
+  type: jvm/app
+  platforms: [ jvm ]
+
+settings:
+  kotlin:
+    languageVersion: 1.9
+    serialization:
+      format: json
+
+dependencies:
+  - ../tl-serialization
+  - org.jetbrains.kotlinx:kotlinx-io-bytestring:0.3.0

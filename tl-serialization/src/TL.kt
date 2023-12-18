@@ -27,13 +27,13 @@ sealed class TL(
         return decodeFromSource(deserializer, buffer)
     }
 
-    private fun <T> encodeToSink(serializationStrategy: SerializationStrategy<T>, sink: Sink, value: T,) {
-        val encoder = TLEncoder(this, sink)
+    private fun <T> encodeToSink(serializationStrategy: SerializationStrategy<T>, sink: Sink, value: T) {
+        val encoder = TLEncoder(this, sink, intArrayOf())
         encoder.encodeSerializableValue(serializationStrategy, value)
     }
 
     private fun <T> decodeFromSource(deserializer: DeserializationStrategy<T>, source: Source): T {
-        val decoder = TLDecoder(this, source)
+        val decoder = TLDecoder(this, source, intArrayOf())
         return decoder.decodeSerializableValue(deserializer)
     }
 }

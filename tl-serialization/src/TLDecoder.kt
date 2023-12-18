@@ -1,14 +1,17 @@
 package io.github.andreypfau.tl.serialization
 
-import io.github.andreypfau.tl.serialization.annotation.TLFlag
-import io.github.andreypfau.tl.serialization.annotation.TLNullable
-import io.github.andreypfau.tl.serialization.annotation.getTlConstructorId
+import io.github.andreypfau.tl.serialization.builtin.Int128
+import io.github.andreypfau.tl.serialization.builtin.Int128Serializer
+import io.github.andreypfau.tl.serialization.builtin.Int256
+import io.github.andreypfau.tl.serialization.builtin.Int256Serializer
 import kotlinx.io.*
+import kotlinx.io.bytestring.ByteString
 import kotlinx.serialization.DeserializationStrategy
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.InternalSerializationApi
 import kotlinx.serialization.SealedClassSerializer
 import kotlinx.serialization.builtins.ByteArraySerializer
+import kotlinx.serialization.builtins.UByteArraySerializer
 import kotlinx.serialization.descriptors.PolymorphicKind
 import kotlinx.serialization.descriptors.SerialDescriptor
 import kotlinx.serialization.encoding.CompositeDecoder
@@ -18,8 +21,8 @@ import kotlinx.serialization.modules.SerializersModule
 class TLDecoder(
     private val tl: TL,
     private val source: Source,
+    private val intValuesCache: IntArray
 ) : Decoder, CompositeDecoder {
-    private val flagFields: MutableMap<String, Int> = HashMap()
     override val serializersModule: SerializersModule
         get() = tl.serializersModule
 
@@ -36,10 +39,9 @@ class TLDecoder(
     override fun decodeByte(): Byte = decodeInt().toByte()
     override fun decodeChar(): Char = decodeInt().toChar()
     override fun decodeShort(): Short = source.readShortLe()
+
     @OptIn(ExperimentalStdlibApi::class)
-    override fun decodeInt(): Int = source.readIntLe().also {
-//        println("decoded int: $it - ${it.toHexString()}")
-    }
+    override fun decodeInt(): Int = source.readIntLe()
     override fun decodeLong(): Long = source.readLongLe()
 
     @ExperimentalSerializationApi
@@ -57,7 +59,7 @@ class TLDecoder(
     override fun decodeEnum(enumDescriptor: SerialDescriptor): Int {
         val value = decodeInt()
         for (i in 0 until enumDescriptor.elementsCount) {
-            if (enumDescriptor.getTlConstructorId(i) == value) {
+            if (enumDescriptor.getTlCombinatorId(i) == value) {
                 return i
             }
         }
@@ -71,32 +73,18 @@ class TLDecoder(
     override fun decodeCharElement(descriptor: SerialDescriptor, index: Int): Char = decodeChar()
     override fun decodeShortElement(descriptor: SerialDescriptor, index: Int): Short = decodeShort()
 
-    @OptIn(ExperimentalSerializationApi::class)
     override fun decodeIntElement(descriptor: SerialDescriptor, index: Int): Int {
-//        println("decodeIntElement: $descriptor - $index")
         val value = decodeInt()
-        val annotations = descriptor.getElementAnnotations(index)
-        for (k in annotations.indices) {
-            val annotation = annotations[k]
-            if (annotation is TLFlag) {
-                flagFields[descriptor.getElementName(index)] = value
-                break
-            }
-        }
-        return value.also {
-//            println("decoded: $it | ${it.toString(16)}")
-        }
+        intValuesCache[index] = value
+        return value
     }
 
     override fun decodeLongElement(descriptor: SerialDescriptor, index: Int): Long = decodeLong()
 
     override fun decodeDoubleElement(descriptor: SerialDescriptor, index: Int): Double = decodeDouble()
     override fun decodeFloatElement(descriptor: SerialDescriptor, index: Int): Float = decodeFloat()
-    override fun decodeStringElement(descriptor: SerialDescriptor, index: Int): String = decodeString().also {
-//        println("decoded string: $it - $index - ${descriptor.serialName}")
-    }
+    override fun decodeStringElement(descriptor: SerialDescriptor, index: Int): String = decodeString()
     override fun endStructure(descriptor: SerialDescriptor) {
-//        println("endStructure: $descriptor")
         // do nothing
     }
 
@@ -112,14 +100,13 @@ class TLDecoder(
         val annotations = descriptor.getElementAnnotations(index)
         for (k in annotations.indices) {
             val annotation = annotations[k]
-            if (annotation is TLNullable) {
-                val flags = flagFields[annotation.field]
-                    ?: error("No flag field '${annotation.field}' for nullable '${descriptor.getElementName(index)}'")
-//                println("decode nullable by flag: ${flags.toUInt().toString(2)} | $index | $deserializer")
-                if (1 shl (annotation.index) and flags != 0) {
-                    return decodeSerializableValue(deserializer).also {
-//                        println("decoded by flag ${flags.toUInt().toString(2)} $index: $it")
-                    }
+            if (annotation is TLConditional) {
+                val flags = intValuesCache[descriptor.getElementIndex(annotation.field)]
+                if (flags == -1) {
+                    error("No value found for `${annotation.field}`")
+                }
+                if (1 shl (annotation.value) and flags != 0) {
+                    return decodeSerializableValue(deserializer)
                 }
                 break
             }
@@ -127,32 +114,53 @@ class TLDecoder(
         return null
     }
 
-    @OptIn(InternalSerializationApi::class, ExperimentalStdlibApi::class)
+    @OptIn(
+        InternalSerializationApi::class, ExperimentalStdlibApi::class, ExperimentalSerializationApi::class,
+        ExperimentalUnsignedTypes::class
+    )
     @Suppress("UNCHECKED_CAST")
     override fun <T> decodeSerializableValue(deserializer: DeserializationStrategy<T>): T {
-        if (deserializer == ByteArraySerializer()) {
-            return decodeByteArray() as T
-        }
-        if (deserializer.descriptor.kind is PolymorphicKind) {
-            val currentConstructorId = decodeInt()
-
-            val elementDescriptor = deserializer.descriptor.getElementDescriptor(1)
-            for (i in 0 until elementDescriptor.elementsCount) {
-                val subclass = elementDescriptor.getElementDescriptor(i)
-                val elementConstructorId = subclass.getTlConstructorId()
-
-                if (currentConstructorId == elementConstructorId) {
-                    val serialName = subclass.serialName
-                    val subclassDeserializer =
-                        (deserializer as SealedClassSerializer<*>).findPolymorphicSerializerOrNull(this, serialName)
-                            ?: error("No polymorphic serializer for $serialName")
-                    return decodeSerializableValue(subclassDeserializer) as T
-                }
+        when {
+            deserializer == ByteArraySerializer() -> {
+                return decodeByteArray() as T
             }
-            throw IllegalStateException("No constructor id $currentConstructorId (${currentConstructorId.toHexString()}) found in ${elementDescriptor.serialName}")
-        }
-        return super.decodeSerializableValue(deserializer).also {
-            println("decodedSerializableValue: $it")
+
+            deserializer == UByteArraySerializer() -> {
+                return decodeByteArray().asUByteArray() as T
+            }
+
+            deserializer == Base64ByteStringSerializer -> {
+                return ByteString(decodeByteArray()) as T
+            }
+
+            deserializer == Int128Serializer -> {
+                return Int128(source.readByteString(16)) as T
+            }
+
+            deserializer == Int256Serializer -> {
+                return Int256(source.readByteString(32)) as T
+            }
+
+            deserializer.descriptor.kind is PolymorphicKind -> {
+                val currentConstructorId = decodeInt()
+
+                val elementDescriptor = deserializer.descriptor.getElementDescriptor(1)
+                for (i in 0 until elementDescriptor.elementsCount) {
+                    val subclass = elementDescriptor.getElementDescriptor(i)
+                    val elementConstructorId = subclass.getTlCombinatorId()
+
+                    if (currentConstructorId == elementConstructorId) {
+                        val serialName = subclass.serialName
+                        val subclassDeserializer =
+                            (deserializer as SealedClassSerializer<*>).findPolymorphicSerializerOrNull(this, serialName)
+                                ?: error("No polymorphic serializer for $serialName")
+                        return decodeSerializableValue(subclassDeserializer) as T
+                    }
+                }
+                throw IllegalStateException("No constructor id $currentConstructorId (${currentConstructorId.toHexString()}) found in ${elementDescriptor.serialName}")
+            }
+
+            else -> return super.decodeSerializableValue(deserializer)
         }
     }
 
@@ -165,7 +173,6 @@ class TLDecoder(
         deserializer: DeserializationStrategy<T>,
         previousValue: T?
     ): T {
-//        println("decode: $descriptor - $index - $deserializer")
         return decodeSerializableValue(deserializer)
     }
 
@@ -177,8 +184,28 @@ class TLDecoder(
     }
 
     override fun beginStructure(descriptor: SerialDescriptor): CompositeDecoder {
-        println("beginStructure: $descriptor")
-        return TLDecoder(tl, source)
+        val intValuesCache = IntArray(descriptor.elementsCount) { -1 }
+//        for (i in 0 until descriptor.elementsCount) {
+//            val elementAnnotations = descriptor.getElementAnnotations(i)
+//            annotations@ for (k in 0 until elementAnnotations.size) {
+//                val annotation = elementAnnotations[k]
+//                if (annotation is TLConditional) {
+//                    val elementIndex = descriptor.getElementIndex(annotation.field)
+//                    if (elementIndex == CompositeDecoder.UNKNOWN_NAME) {
+//                        error("Unknown field '${annotation.field}' for nullable '${descriptor.getElementName(i)}'")
+//                    }
+//                    intValuesCache[elementIndex] = -1
+//                }
+//                if (annotation is TLFixedSize) {
+//                    val elementIndex = descriptor.getElementIndex(annotation.field)
+//                    if (elementIndex == CompositeDecoder.UNKNOWN_NAME) {
+//                        error("Unknown field '${annotation.field}' for fixed size '${descriptor.getElementName(i)}'")
+//                    }
+//                    intValuesCache[elementIndex] = -1
+//                }
+//            }
+//        }
+        return TLDecoder(tl, source, intValuesCache)
     }
 
     fun decodeByteArray(): ByteArray {

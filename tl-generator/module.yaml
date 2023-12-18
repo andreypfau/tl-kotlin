@@ -9,3 +9,4 @@ settings:
 dependencies:
   - ../tl-parser
   - me.alllex.parsus:parsus:0.6.0
+  - com.squareup:kotlinpoet:1.15.3
